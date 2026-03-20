@@ -1,8 +1,0 @@
-# 7Fresh 单元测试模板参考
-
-- 测试类：被测类名 + Test，包路径与被测类一致，位于 src/test/java。
-- 使用 @ExtendWith(MockitoExtension.class) 或 @RunWith(MockitoJUnitRunner.class)。
-- 依赖使用 @Mock，被测类使用 @InjectMocks。
-- 方法命名：test + 方法名_when 条件_should 预期。
-- 结构：AAA（Arrange 准备 Mock 与入参 → Act 调用被测方法 → Assert 断言）。
-- 禁止真实 DB/JSF/JimDB，一律 Mock。
