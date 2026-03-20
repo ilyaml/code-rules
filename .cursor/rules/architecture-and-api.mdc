@@ -1,0 +1,119 @@
+---
+description: "架构与API设计规范 - 分层架构(DongBoot)、对象定义、RESTful与JSF接口规约"
+globs: "**/pom.xml,**/*.java,**/application*.yml,**/application*.yaml,**/application*.properties"
+alwaysApply: false
+---
+
+# 架构与 API 设计规范
+
+> 参考团队 DongBoot 标准架构与《JSF接口定义规范》
+
+基于 **DongBoot** 框架与领域驱动设计（DDD），严格遵守以下开发流程。
+
+**模块目录、包结构与分层依赖图**的完整说明见 `project-structure.mdc`（与 main 分支对齐）。
+
+### Cursor 模板引用（对齐官方「引用文件而非复制大段代码」）
+
+- 本仓库在 `.cursor/templates/` 下提供可复用骨架；**生成或修改同类代码时**，应在对话中通过 **`@` 引用**对应文件以纳入上下文，避免规则正文与模板双份维护、易过期。
+- 推荐引用：
+  - `@.cursor/templates/DongBootApplicationExample.java`：应用启动入口类结构参考
+  - `@.cursor/templates/SseChatEndpointExample.java`：SSE/流式端点示例（按需）
+- 分层、HTTP/JSF 契约仍以本文与 `project-structure.mdc` 为准。
+
+## 一、 分层架构红线
+项目按 `main` / `web` / `client` / `app` / `domain` / `spi` / `infra-api` / `infra-impl` / `common` 分层。
+- **依赖方向**：上层只能依赖下层，禁止反向依赖或跨层调用。
+- **Domain 层（核心业务逻辑）**：绝对纯洁，**严禁依赖任何基础设施**（如 JimDB, JMQ, JSF, JED 等中间件特有类）。
+- **外部二方包调用隔离**：**禁止将二方包（外部服务提供的 DTO 等）内的对象直接在领域模型内使用**，必须在 Infra 防腐层将其转化为内部的 BO。
+- **循环依赖**：❌ **严禁 Bean 出现循环依赖**。出现 `BeanCurrentlyInCreationException` 时必须通过事件解耦或拆分类重构设计，禁止用 `@Lazy` 注解敷衍了事。
+
+## 二、 对象定义与实体扩充
+- `VO` (Web 层), `DTO` (Client/RPC 层), `BO` (Domain 层), `DO` (Infra 层)。
+- 严禁各对象层级互串（如 Controller 直接返回 DO）。
+- **字段新增红线**：开发过程中，涉及在实体对象（Entity/DTO/VO/BO）中新增属性时，**一定在实体的最下面（底部）增加**，以保证原有顺序和序列化的向前兼容。
+- **禁止继承**：不要使用父子类参数设计，以免影响 JSON 解析和 RPC 序列化。
+
+## 三、 API 接口设计 (RESTful)
+
+### 路径与注解映射
+
+- **URL 形态**：`/api/{系统}/{版本}/{模块}/{操作}`（统一小写下划线命名，如 `/api/product/v1/brand/query_list`）。
+
+| 段 | 说明 | 示例 |
+|---|------|------|
+| `api` | 固定前缀 | `api` |
+| 系统 | 系统标识 | `product`、`order` |
+| 版本 | 当前统一 `v1` | `v1` |
+| 模块 | 通常与 Controller 对应 | `brand` |
+| 操作 | 与方法名对应 | `query_brand` |
+
+- `/api/{系统}/{版本}/{模块}` → Controller 类级别 `@RequestMapping`；`/{操作}` → 方法级 `@GetMapping` / `@PostMapping` 等。
+- URL **禁止大写**；**禁止**路径后缀 `.json` / `.xml`（用 `Accept` 表达内容类型）。
+
+### 调用链路（对齐 main 分支约定）
+
+- **PC 端**：子系统直接提供 HTTP，可不经过网关。
+- **APP / 小程序 / M / H5**：经 **Color 网关** → **BFF**，BFF 对各子系统 JSF 封装后再对端输出（设计 HTTP 时需考虑与 BFF 契约一致）。
+
+### 入参与校验
+
+- **请求方式**：写操作强制 `POST`，复杂查询推荐 `POST`。
+- 入参**必须对象封装**，禁止多个平铺参数（文件上传时文件可单独参数，其余业务字段进 Form）。
+- 入参**强制继承 `BaseForm`**，至少包含：
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `traceId` | String | 请求链路追踪 ID，全局唯一 |
+| `platform` | Integer | 来源：1 PC 2 移动 3 安卓 4 iOS 5 小程序 6 快应用 等 |
+
+- Controller 使用 `@Valid` / `@Validated` + JSR-303；**业务规则校验在 Service/App 层**。
+
+### 出参
+
+- 统一 `HttpResponse<T>`，含 `code`、`message`。**禁止**直接抛未包装异常或返回原始结构。
+- 超大整型（如订单号）对前端返回 **String**；列表空数据返回 `[]` 而非 `null`。
+
+### 代码示例（结构示意）
+
+```java
+@RequestMapping("/api/product/v1/brand")
+@RestController
+public class BrandController {
+
+    @Autowired
+    private BrandQueryAppService brandQueryAppService;
+
+    @GetMapping("/query_brand")
+    public HttpResponse<BrandVO> queryBrand(@Valid BrandQueryForm form) {
+        BrandQuery query = new BrandQuery();
+        query.setName(form.getName());
+        BrandQueryResult queryResult = brandQueryAppService.queryBrand(query);
+        HttpResponse<BrandVO> response = new HttpResponse<>();
+        response.setCodeAndMsg(HttpResultEnum.SUCCESS);
+        response.setData(BeanCopierUtil.convert(queryResult, BrandVO.class));
+        return response;
+    }
+}
+```
+
+## 四、 RPC 接口规范 (JSF)
+- **出参/入参**：入参继承 `BaseRequest`，出参封装为 `RpcResponse<T>`。所有传输对象必须实现 `Serializable`。
+- **【强制】新增字段必须加到最后面**：JSF 接口的 Request/DTO 中新增属性时，必须在类的**最下面（末尾）**增加，保证序列化与向前兼容。
+- **JSF Provider (提供端)**：
+  - 必须校验入参（`@Valid`）。
+  - 禁止抛出非业务异常（`Exception`），必须统一转换为 `RpcResponse` 的错误码返回，避免消费端反序列化异常。
+- **JSF Consumer (消费端)**：
+  - 【强制】调用二方包（外部 JSF 服务）**前后**，必须**添加打印入参和出参的日志**，并添加 **UMP 监控**。
+  - 【强制】必须设置 `timeout` 兜底（默认不超过 3s）。
+  - 【强制】调用上游 RPC 时，必须和上游确认支持的序列化方式，建议 Consumer 显式指定 `serialization="hessian"`，❌ **禁止使用 msgpack**。
+
+## 五、 SDK 打包与版本管理
+- **版本递增**：每个需要修改 client 内容（接口或 DTO）的需求，**必须要申请更新 SDK 的版本号**。
+- **阶段命名规范**：
+  - 开发或联调阶段，SDK 版本号中推荐带上**需求的英文名**（例：`1.1.3-prepaidCard-SNAPSHOT`）。
+  - 真正上线前统一合并代码时，必须统一升级为**正式的发布版本号**（例：`1.1.4-SNAPSHOT` 或 `1.1.4.RELEASE`）。
+- **灰度发布兼容**：必须遵循向前兼容原则（只增不改），废弃老字段必须使用 `@Deprecated`。
+
+## 六、 事务与一致性
+- 事务控制放在 **App 层**，`@Transactional(rollbackFor = Exception.class)`。
+- **分布式事务**：❌ **严禁使用 XA/2PC** 等重度强一致分布式事务方案。推荐使用基于本地消息表的可靠消息最终一致性，或 Saga 补偿模式，必须提供幂等的 `compensate()` 接口。
